@@ -10,8 +10,14 @@ from .config import settings
 from .models import ChatRequest, ChatResponse, SourceReference
 from .security import require_permission
 from .connectors.revio import RevioConnector
+from .connectors.webex import WebexConnector
+from .connectors.ccwr import CcwrConnector
+from .connectors.documents import DocumentConnector
 
 revio = RevioConnector()
+webex = WebexConnector()
+ccwr = CcwrConnector()
+documents = DocumentConnector()
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
