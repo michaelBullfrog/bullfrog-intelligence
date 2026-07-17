@@ -72,6 +72,7 @@ class RevioConnector(Connector):
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        base_url: str | None = None,
         force_token_refresh: bool = False,
     ) -> Any:
         token = await self._exchange_token(force=force_token_refresh)
@@ -81,13 +82,19 @@ class RevioConnector(Connector):
             "Accept": "application/json",
         }
 
+        request_url = (
+            f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+            if base_url
+            else settings.revio_url(path)
+        )
+
         async with httpx.AsyncClient(
             timeout=settings.revio_request_timeout_seconds,
             verify=settings.revio_verify_ssl,
         ) as client:
             response = await client.request(
                 method,
-                settings.revio_url(path),
+                request_url,
                 headers=headers,
                 params=params,
             )
@@ -97,6 +104,7 @@ class RevioConnector(Connector):
                 method,
                 path,
                 params=params,
+                base_url=base_url,
                 force_token_refresh=True,
             )
 
@@ -281,6 +289,7 @@ class RevioConnector(Connector):
             "GET",
             "/project-management/api/v1/projects",
             params=params,
+            base_url="https://apim.psarev.io",
         )
 
         data = self._data(payload)
@@ -345,6 +354,7 @@ class RevioConnector(Connector):
             "GET",
             f"/project-management/api/v1/projects/{project_id}/activity",
             params=params,
+            base_url="https://apim.psarev.io",
         )
         data = self._data(payload)
         return data if isinstance(data, dict) else {"entries": data or []}
