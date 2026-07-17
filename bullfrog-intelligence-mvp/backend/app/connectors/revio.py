@@ -65,7 +65,7 @@ class RevioConnector(Connector):
             "X-Revio-Host": settings.revio_host,
             "Accept": "application/json",
         }
-        params = {"page": page, "pageSize": page_size}
+        params = {"page": page, "perPage": page_size}
         async with httpx.AsyncClient(timeout=settings.revio_request_timeout_seconds, verify=settings.revio_verify_ssl) as client:
             return await client.get(settings.revio_url(settings.revio_ticket_list_path), headers=headers, params=params)
 
