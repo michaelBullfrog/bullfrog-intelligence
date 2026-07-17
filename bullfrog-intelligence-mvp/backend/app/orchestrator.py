@@ -27,12 +27,34 @@ async def handle_chat(request: ChatRequest) -> ChatResponse:
 
     if intent == "tickets":
         require_permission(request.user, "tickets")
-        tickets = await revio.search_tickets(status="Open", max_results=10)
+        tickets = await revio.search_tickets(
+            page=1,
+            page_size=500,
+        )
+
+        active_statuses = {
+            "new",
+            "open",
+            "on-hold",
+            "needs reviewed",
+        }
+
+        tickets = [
+        ticket
+            for ticket in tickets
+            if str(ticket.get("status", "")).strip().lower()
+            in active_statuses
+        ]
         return ChatResponse(
-            answer=f"I found {len(tickets)} open ticket record(s).",
+            answer=f"I found {len(tickets)} active Rev.io ticket record(s).",
             intent=intent,
             data={"tickets": tickets},
-            sources=[SourceReference(system="Rev.io PSA", label="Ticket search")],
+            sources=[
+                SourceReference(
+                    system="Rev.io PSA",
+                    label="Live active-ticket search",
+                )
+            ],
         )
 
     if intent == "renewals":
