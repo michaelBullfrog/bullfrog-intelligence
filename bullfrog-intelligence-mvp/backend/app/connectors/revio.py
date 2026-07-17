@@ -262,32 +262,61 @@ class RevioConnector(Connector):
         return rows
 
     async def search_projects(
-        self,
-        *,
-        query: str | None = None,
-        customer_id: int | None = None,
-        page: int = 1,
-        per_page: int = 100,
-    ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = self._paged_params(page, per_page)
-        if customer_id is not None:
-            params["customerId"] = customer_id
+    self,
+    *,
+    query: str | None = None,
+    customer_id: int | None = None,
+    page: int = 1,
+    per_page: int = 100,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "page": page,
+        "perPage": min(max(per_page, 1), 500),
+    }
 
-        payload = await self._request(
-            "GET",
-            "/project-management/api/v1/projects",
-            params=params,
-        )
-        data = self._data(payload) or []
-        rows = data if isinstance(data, list) else (
-            data.get("items") or data.get("projects") or []
-            if isinstance(data, dict) else []
-        )
-        rows = [row for row in rows if isinstance(row, dict)]
+    if customer_id is not None:
+        params["customerId"] = customer_id
 
-        if query:
-            rows = [row for row in rows if self._contains(row, query)]
-        return rows
+    payload = await self._request(
+        "GET",
+        "/project-management/api/v1/projects",
+        params=params,
+    )
+
+    data = self._data(payload)
+
+    if isinstance(data, list):
+        projects = data
+    elif isinstance(data, dict):
+        projects = (
+            data.get("items")
+            or data.get("projects")
+            or data.get("records")
+            or data.get("results")
+            or []
+        )
+    else:
+        projects = []
+
+    projects = [
+        project
+        for project in projects
+        if isinstance(project, dict)
+    ]
+
+    if query:
+        needle = query.casefold()
+        projects = [
+            project
+            for project in projects
+            if needle in json.dumps(
+                project,
+                ensure_ascii=False,
+                default=str,
+            ).casefold()
+        ]
+
+    return projects
 
     async def get_project_activity(
         self,
