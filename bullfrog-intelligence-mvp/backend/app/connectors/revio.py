@@ -193,47 +193,110 @@ class RevioConnector(Connector):
         page: int = 1,
         page_size: int = 500,
         max_results: int | None = None,
+        fetch_all: bool = True,
+        max_pages: int = 100,
     ) -> list[dict[str, Any]]:
-        if max_results is not None:
-            page_size = max_results
+        """
+        Retrieve Rev.io tickets and, by default, automatically walk every page
+        before applying customer, engineer, status, and age filters.
 
-        payload = await self._request(
-            "GET",
-            settings.revio_ticket_list_path,
-            params=self._paged_params(page, min(max(page_size, 1), 500)),
-        )
-        rows = self._data(payload) or []
+        This prevents customer summaries from being limited to only the first
+        ticket page.
+        """
+        safe_page_size = min(max(page_size, 1), 500)
+
+        if max_results is not None:
+            safe_page_size = min(max(max_results, 1), 500)
+
+        current_page = max(page, 1)
+        raw_rows: list[dict[str, Any]] = []
+
+        for _ in range(max(max_pages, 1)):
+            payload = await self._request(
+                "GET",
+                settings.revio_ticket_list_path,
+                params=self._paged_params(current_page, safe_page_size),
+            )
+
+            data = self._data(payload) or []
+
+            if isinstance(data, list):
+                page_rows = [
+                    row for row in data
+                    if isinstance(row, dict)
+                ]
+            elif isinstance(data, dict):
+                nested = (
+                    data.get("items")
+                    or data.get("tickets")
+                    or data.get("records")
+                    or data.get("results")
+                    or []
+                )
+                page_rows = (
+                    [
+                        row for row in nested
+                        if isinstance(row, dict)
+                    ]
+                    if isinstance(nested, list)
+                    else []
+                )
+            else:
+                page_rows = []
+
+            raw_rows.extend(page_rows)
+
+            if not fetch_all:
+                break
+
+            if len(page_rows) < safe_page_size:
+                break
+
+            current_page += 1
+
         tickets = [
             self._normalize_ticket(row)
-            for row in rows
-            if isinstance(row, dict)
+            for row in raw_rows
         ]
 
         if status:
             tickets = [
-                t for t in tickets
-                if str(t.get("status", "")).casefold() == status.casefold()
+                ticket
+                for ticket in tickets
+                if str(ticket.get("status", "")).casefold()
+                == status.casefold()
             ]
+
         if customer_name:
+            needle = customer_name.strip().casefold()
             tickets = [
-                t for t in tickets
-                if customer_name.casefold()
-                in str(t.get("customer_name", "")).casefold()
+                ticket
+                for ticket in tickets
+                if needle
+                in str(ticket.get("customer_name", "")).casefold()
             ]
+
         if assigned_engineer:
+            needle = assigned_engineer.strip().casefold()
             tickets = [
-                t for t in tickets
-                if assigned_engineer.casefold()
-                in str(t.get("assigned_engineer", "")).casefold()
+                ticket
+                for ticket in tickets
+                if needle
+                in str(ticket.get("assigned_engineer", "")).casefold()
             ]
+
         if minimum_age_days is not None:
             tickets = [
-                t for t in tickets
-                if t.get("age_days") is not None
-                and int(t["age_days"]) >= minimum_age_days
+                ticket
+                for ticket in tickets
+                if ticket.get("age_days") is not None
+                and int(ticket["age_days"]) >= minimum_age_days
             ]
-        return tickets
 
+        if max_results is not None:
+            tickets = tickets[:max_results]
+
+        return tickets
 
     async def search_customers(
         self,
