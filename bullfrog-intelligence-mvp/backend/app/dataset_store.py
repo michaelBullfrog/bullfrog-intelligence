@@ -16,6 +16,7 @@ from .database_models import (
 
 def _detect_data_type(data: dict[str, Any]) -> str:
     checks = (
+        ("company_health", "company_health"),
         ("ccwr_renewals", "ccwr_renewals"),
         ("ledger_entries", "billing_ledger"),
         ("service_products", "service_products"),
@@ -44,6 +45,7 @@ def _default_title(
         data.get("customer_name") or ""
     ).strip()
     labels = {
+        "company_health": "Company Health Snapshot",
         "ccwr_renewals": "Cisco Renewal Results",
         "billing_ledger": "Billing Ledger",
         "service_products": "Service Products",
@@ -70,6 +72,7 @@ def _record_count(
     data_type: str,
 ) -> int:
     keys = {
+        "company_health": "attention_items",
         "ccwr_renewals": "ccwr_renewals",
         "billing_ledger": "ledger_entries",
         "service_products": "service_products",
@@ -165,6 +168,7 @@ def save_dataset(
         return None
 
     meaningful_keys = {
+        "company_health",
         "ccwr_renewals",
         "tickets",
         "projects",
