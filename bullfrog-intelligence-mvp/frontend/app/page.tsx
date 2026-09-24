@@ -100,6 +100,7 @@ type ChatMessage = {
 
 const starterPrompts = [
   "Show me how my company is doing",
+  "Show me everything about Commercial Van Interiors",
   "Show active Cisco renewals due in the next 90 days",
   "Show overdue Cisco renewals",
   "Show me all active tickets",
@@ -659,8 +660,6 @@ function StructuredResponse({
   const renewalHealth = result?.data?.renewal_health;
   const attentionItems = result?.data?.attention_items ?? [];
   const standardReports = result?.data?.standard_reports ?? [];
-  const contactsOnly =
-    result?.data?.presentation_mode === "contacts_only";
   const hasExecutiveCompanyReport = standardReports.some(
     (report) => report.report_type === "company_health"
   );
@@ -1096,7 +1095,7 @@ function StructuredResponse({
         </section>
       )}
 
-      {!contactsOnly && standardReports.length === 0 && customer && (
+      {standardReports.length === 0 && customer && (
         <section className="resultSection">
           <div className="sectionHeader">
             <div>
@@ -1703,6 +1702,24 @@ export default function HomePage() {
             + New chat
           </button>
 
+          <button
+            type="button"
+            className="conversationReportButton"
+            onClick={() => void submit("Show me how my company is doing")}
+          >
+            Executive Dashboard
+          </button>
+
+          <button
+            type="button"
+            className="conversationReportButton"
+            onClick={() => {
+              setMessage("Show me everything about ");
+            }}
+          >
+            Customer 360
+          </button>
+
           <div className="brandPanel compactBrandPanel">
             <img
               src="/frog-logo.png"
@@ -1818,11 +1835,8 @@ export default function HomePage() {
 
                 {!(
                   item.role === "assistant" &&
-                  (
-                    item.result?.data?.presentation_mode === "contacts_only" ||
-                    item.result?.data?.standard_reports?.some(
-                      (report) => report.report_type === "company_health"
-                    )
+                  item.result?.data?.standard_reports?.some(
+                    (report) => report.report_type === "company_health"
                   )
                 ) && (
                   <div

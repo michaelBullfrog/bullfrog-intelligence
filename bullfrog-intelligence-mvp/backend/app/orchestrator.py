@@ -68,6 +68,7 @@ Available operations:
 - revio_engineer_workload
 - revio_ticket_aging
 - company_health_snapshot
+- customer_360
 - ccwr_search_renewals
 - generate_previous_results_pdf
 - general_chat
@@ -95,6 +96,7 @@ Arguments:
 - customer invoices: customer_id or customer_name
 - ticket aging: minimum_age_days
 - company health: period_days, ccwr_lookback_days, market
+- customer 360: customer_name, period_days
 - CCW-R renewals: market, customer_name, renewal_scope, status,
   active_only, lookback_days, page_size
 - PDF: no arguments
@@ -133,6 +135,13 @@ company; or asks for a combined support, projects, sales, billing, and renewals
 overview. Examples include "show me how my company is doing", "company health",
 "what needs my attention today", and "give me an executive operations snapshot".
 Default period_days to 30, ccwr_lookback_days to 180, and market to All.
+
+
+Use customer_360 when the user asks for everything about one customer, a
+customer overview, customer 360, account 360, account health, or a combined
+view of a customer's contacts, support tickets, projects, opportunities,
+billing activity, and Cisco renewals. Put the supplied company/customer name
+into customer_name. Default period_days to 90.
 
 Use ccwr_search_renewals for Cisco, CCW, CCW-R, subscription, contract renewal,
 renewal risk, expiring subscriptions, past-due renewals, or renewal reporting.
@@ -373,6 +382,13 @@ def _standard_report(
 def _build_standard_reports(
     data: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    existing_reports = data.get("standard_reports")
+    if (
+        isinstance(existing_reports, list)
+        and existing_reports
+    ):
+        return existing_reports
+
     reports: list[dict[str, Any]] = []
 
     company = data.get("company_health")
@@ -1850,6 +1866,165 @@ def _looks_like_pdf_followup(message: str, has_previous_data: bool) -> bool:
     return direct or confirmation
 
 
+
+def _fallback_plan_from_message(message: str) -> dict[str, Any]:
+    """
+    Deterministic planner used only when OpenAI planning is temporarily
+    unavailable, especially during HTTP 429 rate limiting.
+    """
+    text = " ".join(message.strip().split())
+    lowered = text.casefold()
+
+    def after_any(markers: tuple[str, ...]) -> str | None:
+        for marker in markers:
+            pos = lowered.find(marker)
+            if pos >= 0:
+                value = text[pos + len(marker):].strip(" .?!")
+                return value or None
+        return None
+
+    if (
+        "how is my company" in lowered
+        or "how my company is doing" in lowered
+        or "company health" in lowered
+        or "executive dashboard" in lowered
+        or "executive snapshot" in lowered
+        or "what needs my attention" in lowered
+    ):
+        return {
+            "operation": "company_health_snapshot",
+            "arguments": {
+                "period_days": 30,
+                "ccwr_lookback_days": 180,
+                "market": "All",
+            },
+        }
+
+    if (
+        "customer 360" in lowered
+        or "account 360" in lowered
+        or "everything about" in lowered
+        or "customer overview" in lowered
+        or "account overview" in lowered
+    ):
+        customer_name = after_any(
+            (
+                "everything about ",
+                "customer 360 for ",
+                "account 360 for ",
+                "customer overview for ",
+                "account overview for ",
+            )
+        )
+        return {
+            "operation": "customer_360",
+            "arguments": {
+                "customer_name": customer_name,
+                "period_days": 90,
+            },
+        }
+
+    if "renewal" in lowered or "ccw-r" in lowered or "ccwr" in lowered:
+        market = "All"
+        if "canada" in lowered and not any(
+            token in lowered
+            for token in (" us ", " usa ", "united states", "both")
+        ):
+            market = "Canada"
+        elif (
+            "united states" in lowered
+            or " usa " in f" {lowered} "
+            or " us " in f" {lowered} "
+        ) and "canada" not in lowered:
+            market = "US"
+
+        scope = "all"
+        if "overdue" in lowered or "past due" in lowered:
+            scope = "past_due"
+        elif "30 day" in lowered or "30-day" in lowered:
+            scope = "next_30"
+        elif "60 day" in lowered or "60-day" in lowered:
+            scope = "next_60"
+        elif "90 day" in lowered or "90-day" in lowered or "upcoming" in lowered:
+            scope = "next_90"
+        elif "180 day" in lowered or "180-day" in lowered:
+            scope = "next_180"
+
+        return {
+            "operation": "ccwr_search_renewals",
+            "arguments": {
+                "market": market,
+                "renewal_scope": scope,
+                "active_only": "active" in lowered,
+            },
+        }
+
+    if "contact" in lowered:
+        customer_name = after_any(
+            (
+                "contacts for ",
+                "contact for ",
+                "contacts at ",
+                "contact at ",
+                "contacts from ",
+                "contact from ",
+                "contacts of ",
+                "contact of ",
+            )
+        )
+        if customer_name:
+            return {
+                "operation": "revio_billing_search_contacts",
+                "arguments": {
+                    "customer_name": customer_name,
+                    "query": customer_name,
+                    "page": 1,
+                    "page_size": 100,
+                },
+            }
+
+    if "ticket" in lowered:
+        return {
+            "operation": "revio_search_tickets",
+            "arguments": {
+                "active_only": "active" in lowered or "open" in lowered,
+                "page_size": 500,
+            },
+        }
+
+    if "project" in lowered:
+        return {
+            "operation": "revio_search_projects",
+            "arguments": {
+                "query": after_any(("projects for ", "project for ")),
+                "page": 1,
+                "per_page": 100,
+            },
+        }
+
+    if "opportunit" in lowered or "pipeline" in lowered:
+        return {
+            "operation": "revio_search_opportunities",
+            "arguments": {
+                "page": 1,
+                "per_page": 100,
+            },
+        }
+
+    return {
+        "operation": "general_chat",
+        "arguments": {},
+    }
+
+
+def _openai_rate_limited(exc: Exception) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and exc.response.status_code == 429
+    )
+
+
 async def handle_chat(request: ChatRequest) -> ChatResponse:
     conversation_id = _conversation_id(request)
     previous = CONVERSATIONS.get(conversation_id)
@@ -1863,13 +2038,19 @@ async def handle_chat(request: ChatRequest) -> ChatResponse:
             f"Current user message:\n{request.message}\n\n"
             f"{_context_for_planner(previous)}"
         )
-        plan = extract_json(
-            await openai_response(
-                instructions=PLANNER_INSTRUCTIONS,
-                input_text=planner_input,
-                max_output_tokens=500,
+        try:
+            plan = extract_json(
+                await openai_response(
+                    instructions=PLANNER_INSTRUCTIONS,
+                    input_text=planner_input,
+                    max_output_tokens=350,
+                )
             )
-        )
+        except Exception as exc:
+            if not _openai_rate_limited(exc):
+                raise
+            plan = _fallback_plan_from_message(request.message)
+
         operation = str(plan.get("operation") or "general_chat")
         args = (
             plan.get("arguments")
@@ -1918,6 +2099,536 @@ async def handle_chat(request: ChatRequest) -> ChatResponse:
                 )
             ],
         )
+
+    if operation == "customer_360":
+        customer_name = str(
+            args.get("customer_name") or ""
+        ).strip()
+
+        if not customer_name:
+            answer = (
+                "Which customer would you like a 360° view for?"
+            )
+            return ChatResponse(
+                answer=answer,
+                intent=operation,
+                conversation_id=conversation_id,
+                data={},
+                sources=[],
+            )
+
+        period_days = min(
+            max(int(args.get("period_days") or 90), 1),
+            365,
+        )
+
+        psa_resolution, billing_resolution = await asyncio.gather(
+            revio.resolve_customer(customer_name),
+            revio.resolve_billing_customer(customer_name),
+        )
+
+        psa_matches = psa_resolution.get("matches") or []
+        billing_matches = billing_resolution.get("matches") or []
+
+        if (
+            not psa_resolution.get("resolved")
+            and not billing_resolution.get("resolved")
+        ):
+            combined_names: list[str] = []
+            for match in psa_matches[:5]:
+                name = revio._customer_name(match)
+                if name not in combined_names:
+                    combined_names.append(name)
+            for match in billing_matches[:5]:
+                name = revio._billing_customer_name(match)
+                if name not in combined_names:
+                    combined_names.append(name)
+
+            data = {
+                "customer_query": customer_name,
+                "customer_matches": combined_names,
+                "presentation_mode": "customer_confirmation",
+            }
+
+            if combined_names:
+                answer = (
+                    "I found more than one possible customer. "
+                    "Which one did you mean?\n\n- "
+                    + "\n- ".join(combined_names)
+                )
+            else:
+                answer = (
+                    f"I could not find a customer matching "
+                    f"**{customer_name}**."
+                )
+
+            return ChatResponse(
+                answer=answer,
+                intent=operation,
+                conversation_id=conversation_id,
+                data=data,
+                sources=[
+                    SourceReference(
+                        system="Rev.io",
+                        label="Customer entity resolution",
+                    )
+                ],
+            )
+
+        canonical_name = (
+            billing_resolution.get("customer_name")
+            or psa_resolution.get("customer_name")
+            or customer_name
+        )
+
+        psa_customer_id = (
+            int(psa_resolution["customer_id"])
+            if psa_resolution.get("resolved")
+            else None
+        )
+        billing_customer_id = (
+            int(billing_resolution["customer_id"])
+            if billing_resolution.get("resolved")
+            else None
+        )
+
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=period_days)
+
+        async def safe_customer_call(
+            name: str,
+            coroutine: Any,
+            default: Any,
+        ) -> tuple[str, Any, str | None]:
+            try:
+                return name, await coroutine, None
+            except Exception as exc:
+                return name, default, str(exc)
+
+        calls = [
+            safe_customer_call(
+                "tickets",
+                revio.search_tickets(
+                    customer_name=canonical_name,
+                    page_size=500,
+                    fetch_all=True,
+                ),
+                [],
+            ),
+            safe_customer_call(
+                "projects",
+                revio.search_projects(
+                    customer_id=psa_customer_id,
+                    page=1,
+                    per_page=500,
+                )
+                if psa_customer_id is not None
+                else asyncio.sleep(0, result=[]),
+                [],
+            ),
+            safe_customer_call(
+                "opportunities",
+                revio.search_opportunities(
+                    customer_id=psa_customer_id,
+                    page=1,
+                    per_page=500,
+                )
+                if psa_customer_id is not None
+                else asyncio.sleep(0, result=[]),
+                [],
+            ),
+            safe_customer_call(
+                "contacts",
+                revio.search_billing_contacts(
+                    customer_id=billing_customer_id,
+                    page=1,
+                    page_size=500,
+                )
+                if billing_customer_id is not None
+                else asyncio.sleep(0, result=[]),
+                [],
+            ),
+            safe_customer_call(
+                "billing",
+                revio.get_billing_customer_ledger(
+                    customer_id=billing_customer_id,
+                    created_date_start=start_date.isoformat(),
+                    created_date_end=end_date.isoformat(),
+                    page_size=500,
+                )
+                if billing_customer_id is not None
+                else asyncio.sleep(
+                    0,
+                    result={
+                        "entries": [],
+                        "total_charges": 0,
+                        "total_credits": 0,
+                    },
+                ),
+                {
+                    "entries": [],
+                    "total_charges": 0,
+                    "total_credits": 0,
+                },
+            ),
+            safe_customer_call(
+                "renewals",
+                asyncio.to_thread(get_renewal_snapshot),
+                {
+                    "ccwr_renewals": [],
+                    "renewal_summary": {},
+                },
+            ),
+        ]
+
+        gathered = await asyncio.gather(*calls)
+        values = {name: value for name, value, _ in gathered}
+        errors = {
+            name: error
+            for name, _, error in gathered
+            if error
+        }
+
+        tickets = _records_from_response(
+            values["tickets"],
+            preferred_keys=("tickets",),
+        )
+        projects = _records_from_response(
+            values["projects"],
+            preferred_keys=("projects",),
+        )
+        opportunities = _records_from_response(
+            values["opportunities"],
+            preferred_keys=("opportunities",),
+        )
+        contacts = _records_from_response(
+            values["contacts"],
+            preferred_keys=("contacts",),
+        )
+        billing = (
+            values["billing"]
+            if isinstance(values["billing"], dict)
+            else {}
+        )
+
+        renewal_snapshot = (
+            values["renewals"]
+            if isinstance(values["renewals"], dict)
+            else {}
+        )
+        all_renewals = _records_from_response(
+            renewal_snapshot,
+            preferred_keys=("ccwr_renewals",),
+        )
+
+        canonical_fold = canonical_name.casefold()
+        customer_renewals = [
+            renewal
+            for renewal in all_renewals
+            if canonical_fold
+            in str(
+                renewal.get("end_customer_name")
+                or renewal.get("customerName")
+                or ""
+            ).casefold()
+        ]
+
+        active_tickets = active_only(tickets)
+        active_projects = [
+            project
+            for project in projects
+            if str(
+                project.get("projectStatusName")
+                or project.get("status")
+                or ""
+            ).strip().casefold()
+            in {"active", "open", "in progress", "in-progress"}
+        ]
+
+        billing_entries = billing.get("ledger_entries") or billing.get("entries") or []
+        total_charges = float(billing.get("total_charges") or 0)
+        total_credits = float(billing.get("total_credits") or 0)
+        net_billing = float(
+            billing.get("net_billing_activity")
+            or billing.get("net_charges_less_credits")
+            or (total_charges - total_credits)
+        )
+
+        customer_report = _standard_report(
+            report_type="customer_360",
+            title=f"{canonical_name} — Customer 360",
+            source="Ribbit Intelligence",
+            period=f"Last {period_days} days",
+            summary=(
+                f"{canonical_name} has {len(active_tickets)} active tickets, "
+                f"{len(active_projects)} active projects, "
+                f"{len(opportunities)} opportunities, "
+                f"{len(customer_renewals)} Cisco renewals, and "
+                f"${net_billing:,.2f} in net billing activity."
+            ),
+            kpis=[
+                {
+                    "label": "Active Tickets",
+                    "value": len(active_tickets),
+                    "format": "number",
+                },
+                {
+                    "label": "Active Projects",
+                    "value": len(active_projects),
+                    "format": "number",
+                },
+                {
+                    "label": "Opportunities",
+                    "value": len(opportunities),
+                    "format": "number",
+                },
+                {
+                    "label": "Renewals",
+                    "value": len(customer_renewals),
+                    "format": "number",
+                },
+                {
+                    "label": "Net Billing",
+                    "value": net_billing,
+                    "format": "currency",
+                },
+                {
+                    "label": "Contacts",
+                    "value": len(contacts),
+                    "format": "number",
+                },
+            ],
+            attention_items=[
+                {
+                    "severity": "Review",
+                    "title": f"{area} data unavailable",
+                    "detail": error,
+                }
+                for area, error in errors.items()
+            ],
+            detail_sections=[
+                {
+                    "title": "Contacts",
+                    "columns": [
+                        {"key": "name", "label": "Name"},
+                        {"key": "email", "label": "Email"},
+                        {"key": "phone", "label": "Phone"},
+                        {"key": "title", "label": "Title"},
+                    ],
+                    "rows": [
+                        {
+                            "name": (
+                                contact.get("Name")
+                                or contact.get("name")
+                                or "—"
+                            ),
+                            "email": (
+                                contact.get("Email")
+                                or contact.get("email")
+                                or "—"
+                            ),
+                            "phone": (
+                                contact.get("Phone")
+                                or contact.get("phone")
+                                or contact.get("PhoneNumber")
+                                or "—"
+                            ),
+                            "title": (
+                                contact.get("Title")
+                                or contact.get("title")
+                                or "—"
+                            ),
+                        }
+                        for contact in contacts[:200]
+                    ],
+                },
+                {
+                    "title": "Ticket Details",
+                    "columns": [
+                        {"key": "ticket_id", "label": "Ticket ID"},
+                        {"key": "subject", "label": "Subject"},
+                        {"key": "status", "label": "Status"},
+                        {"key": "priority", "label": "Priority"},
+                        {"key": "engineer", "label": "Engineer"},
+                        {"key": "age_days", "label": "Age", "type": "days"},
+                    ],
+                    "rows": [
+                        {
+                            "ticket_id": (
+                                ticket.get("ticket_id")
+                                or ticket.get("ticketId")
+                                or ticket.get("id")
+                                or "—"
+                            ),
+                            "subject": ticket.get("subject") or "—",
+                            "status": ticket.get("status") or "—",
+                            "priority": ticket.get("priority") or "—",
+                            "engineer": (
+                                ticket.get("assigned_engineer")
+                                or ticket.get("assignedEngineer")
+                                or "Unassigned"
+                            ),
+                            "age_days": ticket.get("age_days") or 0,
+                        }
+                        for ticket in tickets[:200]
+                    ],
+                },
+                {
+                    "title": "Project Details",
+                    "columns": [
+                        {"key": "project", "label": "Project"},
+                        {"key": "status", "label": "Status"},
+                        {"key": "owner", "label": "Owner"},
+                        {"key": "start", "label": "Start", "type": "date"},
+                        {"key": "end", "label": "End", "type": "date"},
+                    ],
+                    "rows": [
+                        {
+                            "project": (
+                                project.get("projectName")
+                                or project.get("name")
+                                or "—"
+                            ),
+                            "status": (
+                                project.get("projectStatusName")
+                                or project.get("status")
+                                or "—"
+                            ),
+                            "owner": (
+                                project.get("projectManagerName")
+                                or project.get("ownerName")
+                                or "—"
+                            ),
+                            "start": project.get("startDate"),
+                            "end": project.get("endDate"),
+                        }
+                        for project in projects[:200]
+                    ],
+                },
+                {
+                    "title": "Opportunity Details",
+                    "columns": [
+                        {"key": "opportunity", "label": "Opportunity"},
+                        {"key": "stage", "label": "Stage"},
+                        {"key": "owner", "label": "Owner"},
+                        {"key": "amount", "label": "Amount", "type": "currency"},
+                        {"key": "close_date", "label": "Close Date", "type": "date"},
+                    ],
+                    "rows": [
+                        {
+                            "opportunity": (
+                                opportunity.get("name")
+                                or opportunity.get("title")
+                                or opportunity.get("subject")
+                                or "—"
+                            ),
+                            "stage": (
+                                opportunity.get("stageName")
+                                or opportunity.get("stage")
+                                or opportunity.get("status")
+                                or "—"
+                            ),
+                            "owner": (
+                                opportunity.get("ownerName")
+                                or opportunity.get("owner")
+                                or "—"
+                            ),
+                            "amount": _number_from_record(
+                                opportunity,
+                                (
+                                    "amount",
+                                    "Amount",
+                                    "value",
+                                    "estimatedValue",
+                                ),
+                            ),
+                            "close_date": (
+                                opportunity.get("expectedCloseDate")
+                                or opportunity.get("closeDate")
+                            ),
+                        }
+                        for opportunity in opportunities[:200]
+                    ],
+                },
+                {
+                    "title": "Billing Details",
+                    "columns": [
+                        {"key": "metric", "label": "Metric"},
+                        {"key": "value", "label": "Value"},
+                    ],
+                    "rows": [
+                        {
+                            "metric": "Total charges",
+                            "value": total_charges,
+                            "value_type": "currency",
+                        },
+                        {
+                            "metric": "Total credits",
+                            "value": total_credits,
+                            "value_type": "currency",
+                        },
+                        {
+                            "metric": "Net billing activity",
+                            "value": net_billing,
+                            "value_type": "currency",
+                        },
+                        {
+                            "metric": "Ledger entries",
+                            "value": len(billing_entries),
+                        },
+                    ],
+                },
+                {
+                    "title": "Renewal Details",
+                    "columns": [
+                        {"key": "subscription_id", "label": "Subscription ID"},
+                        {"key": "market", "label": "Market"},
+                        {"key": "status", "label": "Status"},
+                        {"key": "renewal_date", "label": "Renewal Date", "type": "date"},
+                        {"key": "days", "label": "Days Remaining"},
+                    ],
+                    "rows": [
+                        {
+                            "subscription_id": (
+                                renewal.get("subscription_id")
+                                or renewal.get("subscriptionId")
+                                or "—"
+                            ),
+                            "market": renewal.get("market") or "—",
+                            "status": (
+                                renewal.get("subscription_status")
+                                or renewal.get("status")
+                                or "—"
+                            ),
+                            "renewal_date": (
+                                renewal.get("dashboard_renewal_date")
+                                or renewal.get("renewal_date")
+                            ),
+                            "days": renewal.get("days_until_renewal"),
+                        }
+                        for renewal in customer_renewals[:200]
+                    ],
+                },
+            ],
+        )
+
+        data = {
+            "customer_360": {
+                "customer_name": canonical_name,
+                "psa_customer_id": psa_customer_id,
+                "billing_customer_id": billing_customer_id,
+            },
+            "contacts": contacts,
+            "tickets": tickets,
+            "projects": projects,
+            "opportunities": opportunities,
+            "billing": billing,
+            "ccwr_renewals": customer_renewals,
+            "standard_reports": [customer_report],
+            "primary_report": customer_report,
+            "presentation_mode": "customer_360",
+        }
+        label = "Combined Customer 360 data interpreted by Ribbit"
 
     if operation == "company_health_snapshot":
         period_days = min(
@@ -3186,9 +3897,10 @@ async def handle_chat(request: ChatRequest) -> ChatResponse:
 
     else:
         context = _context_for_planner(previous)
-        answer = await openai_response(
-            instructions=(
-                "You are Bullfrog Intelligence. Continue the conversation using "
+        try:
+            answer = await openai_response(
+                instructions=(
+                    "You are Bullfrog Intelligence. Continue the conversation using "
                 "the provided context. The connected live platform includes Rev.io "
                 "PSA tickets, projects, project activity, opportunities, and invoices, "
                 "plus Rev.io Billing customers, contacts, products, service "
@@ -3200,8 +3912,18 @@ async def handle_chat(request: ChatRequest) -> ChatResponse:
                 f"Current message:\n{request.message}\n\n"
                 f"Conversation context:\n{context}"
             ),
-            max_output_tokens=700,
-        )
+                max_output_tokens=700,
+            )
+        except Exception as exc:
+            if not _openai_rate_limited(exc):
+                raise
+            answer = (
+                "Ribbit's AI planning service is temporarily rate-limited. "
+                "Live business-data searches such as customers, contacts, "
+                "tickets, renewals, projects, opportunities, Customer 360, "
+                "and the Executive Dashboard can still use the built-in "
+                "fallback router. Please retry this general question shortly."
+            )
         data = deepcopy(previous_data) if isinstance(previous_data, dict) else {}
         _save_conversation(
             conversation_id,
